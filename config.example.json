@@ -1,0 +1,14 @@
+{
+  "access_key_id": "你的AccessKey ID",
+  "access_key_secret": "你的AccessKey Secret",
+  "product_id": 14278,
+  "category_id": 80793,
+  "ticket_title": "我的香港轻量应用服务器带宽被严重限速，请帮忙检查解锁",
+  "ticket_description": "您好，我购买的香港轻量应用服务器带宽为30Mbps。请帮忙检查服务器是否存在带宽限速情况，如果存在限速请帮忙解锁。谢谢！",
+  "cron_expression": "0 0 6,18 * * *",
+  "speed_threshold": 20.0,
+  "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook-id",
+  "callback_url": "http://你的VPS公网IP:9876",
+  "callback_port": 9876,
+  "auto_submit": false
+}
