@@ -5,8 +5,8 @@ use axum::extract::{Query, State};
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
-use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tokio::sync::{mpsc, Mutex};
+use tracing::{error, info};
 
 use crate::client::WorkorderClient;
 use crate::config::Config;
@@ -21,12 +21,26 @@ struct PendingApproval {
 
 pub struct CallbackServer {
     pending: Arc<Mutex<Vec<PendingApproval>>>,
+    check_tx: mpsc::Sender<()>,
+    secret: Option<String>,
 }
 
 impl CallbackServer {
-    pub fn new() -> Self {
-        Self {
+    pub fn new(secret: Option<String>) -> (Self, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel(8);
+        let server = Self {
             pending: Arc::new(Mutex::new(Vec::new())),
+            check_tx: tx,
+            secret,
+        };
+        (server, rx)
+    }
+
+    /// 验证请求中的 secret
+    fn verify_secret(&self, params: &HashMap<String, String>) -> bool {
+        match &self.secret {
+            Some(s) => params.get("secret").map(|v| v == s).unwrap_or(false),
+            None => true, // 未配置 secret 则不鉴权
         }
     }
 
@@ -43,15 +57,28 @@ impl CallbackServer {
     }
 
     /// 构建审批 URL
-    pub fn approve_url(callback_url: &str, token: &str) -> String {
+    pub fn approve_url(callback_url: &str, token: &str, secret: &Option<String>) -> String {
         let base = callback_url.trim_end_matches('/');
-        format!("{}/approve?token={}", base, token)
+        match secret {
+            Some(s) => format!("{}/approve?token={}&secret={}", base, token, s),
+            None => format!("{}/approve?token={}", base, token),
+        }
+    }
+
+    /// 构建手动触发 URL
+    pub fn check_url(callback_url: &str, secret: &Option<String>) -> String {
+        let base = callback_url.trim_end_matches('/');
+        match secret {
+            Some(s) => format!("{}/check?secret={}", base, s),
+            None => format!("{}/check", base),
+        }
     }
 
     /// 启动 HTTP 服务
     pub async fn start(self: Arc<Self>, port: u16) {
         let app = Router::new()
             .route("/approve", get(handle_approve))
+            .route("/check", get(handle_check))
             .with_state(self.clone());
 
         let addr = format!("0.0.0.0:{}", port);
@@ -71,10 +98,34 @@ impl CallbackServer {
     }
 }
 
+/// 处理手动触发
+async fn handle_check(
+    State(server): State<Arc<CallbackServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Html<String> {
+    if !server.verify_secret(&params) {
+        return Html("<h2>❌ 鉴权失败</h2>".to_string());
+    }
+
+    match server.check_tx.try_send(()) {
+        Ok(_) => {
+            info!("收到手动触发请求");
+            Html("<h2>✅ 已触发检测，结果将发送到飞书</h2>".to_string())
+        }
+        Err(_) => {
+            Html("<h2>⏳ 已有任务在执行中，请稍后再试</h2>".to_string())
+        }
+    }
+}
+
 async fn handle_approve(
     State(server): State<Arc<CallbackServer>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Html<String> {
+    if !server.verify_secret(&params) {
+        return Html("<h2>❌ 鉴权失败</h2>".to_string());
+    }
+
     let token = match params.get("token") {
         Some(t) => t.clone(),
         None => return Html("<h2>缺少 token 参数</h2>".to_string()),

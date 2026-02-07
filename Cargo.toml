@@ -20,3 +20,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-cron-scheduler = "0.13"
 axum = "0.8"
 rand = "0.8"
+teloxide = { version = "0.13", features = ["macros"] }

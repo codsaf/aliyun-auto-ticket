@@ -16,7 +16,10 @@ pub struct FileConfig {
     pub feishu_webhook_url: Option<String>,
     pub callback_url: Option<String>,
     pub callback_port: Option<u16>,
+    pub callback_secret: Option<String>,
     pub auto_submit: Option<bool>,
+    pub telegram_bot_token: Option<String>,
+    pub telegram_chat_id: Option<i64>,
 }
 
 /// 应用配置
@@ -38,8 +41,14 @@ pub struct Config {
     pub callback_url: Option<String>,
     /// 回调服务监听端口
     pub callback_port: u16,
+    /// 手动触发和审批的鉴权密钥
+    pub callback_secret: Option<String>,
     /// 限速时是否自动提交工单（不等审批）
     pub auto_submit: bool,
+    /// Telegram Bot Token（通过 @BotFather 获取）
+    pub telegram_bot_token: Option<String>,
+    /// 允许操作 Bot 的 Telegram 用户 ID
+    pub telegram_chat_id: Option<i64>,
 }
 
 impl Config {
@@ -112,11 +121,24 @@ impl Config {
             .or(file_cfg.callback_port)
             .unwrap_or(9876);
 
+        let callback_secret = std::env::var("CALLBACK_SECRET")
+            .ok()
+            .or(file_cfg.callback_secret);
+
         let auto_submit = std::env::var("AUTO_SUBMIT")
             .ok()
             .map(|v| v == "true" || v == "1")
             .or(file_cfg.auto_submit)
             .unwrap_or(false);
+
+        let telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
+            .ok()
+            .or(file_cfg.telegram_bot_token);
+
+        let telegram_chat_id = std::env::var("TELEGRAM_CHAT_ID")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .or(file_cfg.telegram_chat_id);
 
         Ok(Self {
             access_key_id,
@@ -132,7 +154,10 @@ impl Config {
             feishu_webhook_url,
             callback_url,
             callback_port,
+            callback_secret,
             auto_submit,
+            telegram_bot_token,
+            telegram_chat_id,
         })
     }
 

@@ -5,6 +5,7 @@ mod templates;
 mod server;
 mod signer;
 mod speedtest;
+mod telegram;
 
 use std::sync::Arc;
 
@@ -29,10 +30,12 @@ async fn check_speed_and_notify(config: config::Config, callback_server: Arc<ser
         Ok(s) => s,
         Err(e) => {
             error!("测速失败: {:#}", e);
-            // 测速失败通知飞书
+            let msg = format!("测速失败: {:#}\n保险起见请手动检查带宽情况", e);
             if let Some(webhook) = &config.feishu_webhook_url {
-                let msg = format!("测速失败: {:#}\n保险起见请手动检查带宽情况", e);
                 let _ = feishu::send_text(webhook, &msg).await;
+            }
+            if let (Some(token), Some(chat_id)) = (&config.telegram_bot_token, config.telegram_chat_id) {
+                let _ = telegram::send_message(token, chat_id, &format!("❌ {}", msg)).await;
             }
             return;
         }
@@ -59,12 +62,18 @@ async fn check_speed_and_notify(config: config::Config, callback_server: Arc<ser
                     if let Some(webhook) = &cfg.feishu_webhook_url {
                         let _ = feishu::send_text(webhook, &msg).await;
                     }
+                    if let (Some(token), Some(chat_id)) = (&cfg.telegram_bot_token, cfg.telegram_chat_id) {
+                        let _ = telegram::send_message(token, chat_id, &msg).await;
+                    }
                 }
                 Err(e) => {
                     let msg = format!("⚠️ 带宽限速告警\n下载速度: {:.2} Mbps（阈值: {} Mbps）\n❌ 自动提交工单失败: {:#}", speed, threshold, e);
                     error!("工单提交失败: {:#}", e);
                     if let Some(webhook) = &cfg.feishu_webhook_url {
                         let _ = feishu::send_text(webhook, &msg).await;
+                    }
+                    if let (Some(token), Some(chat_id)) = (&cfg.telegram_bot_token, cfg.telegram_chat_id) {
+                        let _ = telegram::send_message(token, chat_id, &msg).await;
                     }
                 }
             }
@@ -73,7 +82,7 @@ async fn check_speed_and_notify(config: config::Config, callback_server: Arc<ser
             let webhook = cfg.feishu_webhook_url.clone().unwrap();
             if let Some(callback_url) = cfg.callback_url.clone() {
                 let token = callback_server.add_pending(cfg).await;
-                let approve_url = server::CallbackServer::approve_url(&callback_url, &token);
+                let approve_url = server::CallbackServer::approve_url(&callback_url, &token, &config.callback_secret);
                 if let Err(e) = feishu::send_throttle_card(&webhook, speed, threshold, &approve_url).await {
                     error!("飞书卡片发送失败: {:#}", e);
                 }
@@ -90,6 +99,9 @@ async fn check_speed_and_notify(config: config::Config, callback_server: Arc<ser
         info!("{}", msg);
         if let Some(webhook) = &config.feishu_webhook_url {
             let _ = feishu::send_text(webhook, &msg).await;
+        }
+        if let (Some(token), Some(chat_id)) = (&config.telegram_bot_token, config.telegram_chat_id) {
+            let _ = telegram::send_message(token, chat_id, &msg).await;
         }
     }
 }
@@ -162,22 +174,40 @@ async fn main() -> Result<()> {
     }
 
     // 创建回调服务
-    let callback_server = Arc::new(server::CallbackServer::new());
+    let (callback_server, trigger_rx) = server::CallbackServer::new(config.callback_secret.clone());
+    let callback_server = Arc::new(callback_server);
 
-    // 立即执行模式（测速 + 飞书通知）
+    // 监听手动触发信号，执行完整流程（测速 → 判断 → 通知/提交工单）
+    fn spawn_trigger_listener(
+        mut rx: tokio::sync::mpsc::Receiver<()>,
+        config: config::Config,
+        callback_server: Arc<server::CallbackServer>,
+    ) {
+        tokio::spawn(async move {
+            while rx.recv().await.is_some() {
+                check_speed_and_notify(config.clone(), callback_server.clone()).await;
+            }
+        });
+    }
+
+    // 立即执行模式
     if args.iter().any(|a| a == "--now" || a == "-n") {
         info!("立即执行模式");
-        // 启动回调服务
-        let server = callback_server.clone();
+        let srv = callback_server.clone();
         let port = config.callback_port;
-        tokio::spawn(async move { server.start(port).await });
-        // 短暂等待服务启动
+        tokio::spawn(async move { srv.start(port).await });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        check_speed_and_notify(config, callback_server.clone()).await;
+        // 启动 Telegram Bot
+        if config.telegram_bot_token.is_some() {
+            let tg_cfg = config.clone();
+            tokio::spawn(async move { telegram::start_bot(tg_cfg).await });
+        }
 
-        // 如果有待审批的请求，保持运行等待回调
-        info!("等待审批回调中（按 Ctrl+C 退出）...");
+        spawn_trigger_listener(trigger_rx, config.clone(), callback_server.clone());
+        check_speed_and_notify(config, callback_server).await;
+
+        info!("等待回调或手动触发（按 Ctrl+C 退出）...");
         tokio::signal::ctrl_c().await?;
         return Ok(());
     }
@@ -187,15 +217,22 @@ async fn main() -> Result<()> {
         "定时任务模式，cron: {}，测速阈值: {} Mbps",
         config.cron_expression, config.speed_threshold
     );
-    info!("提示: --now 立即执行 | --submit 直接提交 | --list 查询产品/分类 | --speedtest 仅测速");
+
+    if let Some(url) = &config.callback_url {
+        info!("手动触发: {}", server::CallbackServer::check_url(url, &config.callback_secret));
+    }
 
     // 启动回调服务
-    let server = callback_server.clone();
+    let srv = callback_server.clone();
     let port = config.callback_port;
-    tokio::spawn(async move { server.start(port).await });
+    tokio::spawn(async move { srv.start(port).await });
+
+    // 启动手动触发监听
+    spawn_trigger_listener(trigger_rx, config.clone(), callback_server.clone());
 
     let mut sched = JobScheduler::new().await?;
 
+    let config_for_tg = config.clone();
     let cron_expr = config.cron_expression.clone();
     let cb_server = callback_server.clone();
     let job = Job::new_async_tz(cron_expr.as_str(), chrono::Local, move |_uuid, _lock| {
@@ -209,6 +246,11 @@ async fn main() -> Result<()> {
 
     sched.add(job).await?;
     sched.start().await?;
+
+    // 启动 Telegram Bot
+    if config_for_tg.telegram_bot_token.is_some() {
+        tokio::spawn(async move { telegram::start_bot(config_for_tg).await });
+    }
 
     info!("定时任务已启动，等待下次执行...");
     info!("按 Ctrl+C 退出");

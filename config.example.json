@@ -10,5 +10,8 @@
   "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook-id",
   "callback_url": "http://你的VPS公网IP:9876",
   "callback_port": 9876,
-  "auto_submit": false
+  "callback_secret": "改成你自己的随机字符串",
+  "auto_submit": false,
+  "telegram_bot_token": "123456:ABC-DEF（通过 @BotFather 获取）",
+  "telegram_chat_id": 0
 }
